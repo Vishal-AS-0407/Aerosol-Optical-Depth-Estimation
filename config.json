@@ -1,0 +1,29 @@
+{
+    "paths":
+    {
+        "dataset":
+        {
+            "train_images":"Data/train_images",
+            "train_target":"Data/train_answer.csv",
+            "test_images":"Data/test_images"
+        },
+        "checkpoint":"checkpoint",
+        "test_prediction":"prediction"
+    },
+    "meta_data":
+    {
+        "model_name":"Vanilla_net",
+        "experiment_number":4,
+        "trainable_parameters":100
+    },
+    "model_configuration":
+    {
+        "learning_rate":0.0001,
+        "seed":100,
+        "batch_size":16,
+        "epochs":200,
+        "device":"cuda",
+        "test_every":5,
+        "test_batch_size":15
+    }
+}
