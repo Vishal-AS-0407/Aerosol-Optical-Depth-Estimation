@@ -28,8 +28,8 @@ class Trainer:
         seed (int, optional): Random seed for reproducibility. Default is None.
     """
     def __init__(self, config: dict, model: torch.nn.ModuleList,
-                loss_fn: torch.nn, log: bool = False, project_name: str = None,
-                resume: bool = False, seed: int = None):
+                 loss_fn: torch.nn, log: bool = False, project_name: str = None,
+                 resume: bool = False, seed: int = None):
 
         self.paths = config['paths']
         self.config = config['model_configuration']
@@ -47,6 +47,7 @@ class Trainer:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config['learning_rate'])
         self.running_loss = None
         self.train_data, self.test = self.load_dataset()
+        self.scalar = torch.cuda.amp.GradScaler()
 
         if self.log:
             wandb.init(
@@ -68,16 +69,21 @@ class Trainer:
             image (torch.Tensor): Input images.
             gt (torch.Tensor): Ground truth labels.
         """
-        self.optimizer.zero_grad()
-        image = image.to(self.config['device'])
-        gt = gt.to(self.config['device'])
-        prediction = self.model(image)
-        loss = self.cost(prediction, gt)
+        with torch.autocast(device_type=self.config["device"], dtype=torch.float16):
+            self.optimizer.zero_grad()
+            image = image.to(self.config['device'])
+            assert image.dtype is torch.float16
+            gt = gt.to(self.config['device'])
+            prediction = self.model(image)
+            loss = self.cost(prediction[:,0], gt)
+            assert loss.dtype is torch.float16
 
-        loss.backward()
-        self.optimizer.step()
+        self.scalar.scale(loss).backward()
+        self.scalar.step(self.optimizer)
+        self.scalar.update()
+
         self.running_loss += loss.detach().item()
-        #print(f'\ttotal loss - {loss}\n\trunning_loss - {self.running_loss}')
+        print(f'\ttotal loss - {loss}\n\trunning_loss - {self.running_loss}')
         gradient_flow = utils.utility.grad_flow_dict(self.model.named_parameters())
         if self.log:
             d = {"loss": loss}
@@ -99,18 +105,17 @@ class Trainer:
 
         for image, label in self.train_data:
             print(f"....................step - {step} of"
-                  f"{len(self.train_data)}....................\n")
+                f"{len(self.train_data)}....................\n")
             batch_start = time.time()
             self._run_batch(image, label)
-  
-            
+
             cpu = psutil.cpu_percent()
             ram = psutil.virtual_memory().percent
-            #print(f'CPU used - {cpu} ... RAM used - {ram}')
+            print(f'CPU used - {cpu} ... RAM used - {ram}')
             batch_end = time.time()
             step += 1
-            #print(f'\taverage_loss - {self.running_loss / step}'
-            #      f'\n\tbatch time - {batch_end - batch_start}')
+            print(f'\taverage_loss - {self.running_loss / step}'
+                  f'\n\tbatch time - {batch_end - batch_start}')
 
         epoch_end = time.time()
         if self.log:
@@ -118,14 +123,12 @@ class Trainer:
                 "loss per epoch": self.running_loss / len(self.train_data),
                 "epoch time": epoch_end - epoch_start
             })
-        #print(f"Epoch {epoch + 1}, Loss: {self.running_loss / len(self.train_data):.4f}"
-        #      f"\ntime - {epoch_end - epoch_start}")
-        
-        if (epoch+1)%20==0:
-            self._save_checkpoint(epoch)
+        print(f"Epoch {epoch + 1}, Loss: {self.running_loss / len(self.train_data):.4f}"
+              f"\ntime - {epoch_end - epoch_start}")
 
-        if (epoch+1)%self.config["test_every"] == 0:
-            self._generate_test_output(epoch+1)
+        self._save_checkpoint(20,epoch)
+        if epoch%self.config["test_every"] == 0:
+            self._generate_test_output(epoch)
 
     def load_dataset(self, transform=None, shuffle=True):
         """
@@ -144,7 +147,7 @@ class Trainer:
         train_loader = DataLoader(train_data, batch_size=self.config['batch_size'], shuffle=shuffle)
         test_data = dataLoader.CustomDataset(self.paths['dataset']['test_images'],
                                             transform=transform)
-        test_loader = DataLoader(test_data, batch_size=self.config['test_batch_size'], shuffle=False)
+        test_loader = DataLoader(test_data, batch_size=self.config['batch_size'], shuffle=False)
         return train_loader, test_loader
 
     def _predict_test(self):
@@ -191,7 +194,7 @@ class Trainer:
         with open(output_path, mode='w',encoding="UTF8",newline='') as file:
             writer = csv.writer(file)
             for file_name, prediction in zip(file_names_list, predictions_list):
-                writer.writerow([file_name, prediction])
+                writer.writerow([file_name, prediction[0]])
 
     def _generate_test_output(self,epoch_num)->None:
         predictions,targets = self._predict_test()
@@ -210,7 +213,7 @@ class Trainer:
         root = os.path.join(root,'test_answer.csv')
         self._write_output_file(predictions,targets,root)
 
-    def _save_checkpoint(self, epoch:int):
+    def _save_checkpoint(self, n:int, epoch:int):
         """
         Save the model and optimizer state at a checkpoint.
 
@@ -227,8 +230,8 @@ class Trainer:
         root = os.path.join(root, str(self.meta["experiment_number"]))
         if not os.path.exists(root):
             os.mkdir(root)
-        torch.save(self.model.state_dict(), os.path.join(root, f'gen{epoch+1}.pth'))
-        torch.save(self.optimizer.state_dict(), os.path.join(root, f'opt{epoch+1}.pth'))
+        torch.save(self.model.state_dict(), os.path.join(root, f'gen{epoch % n}.pth'))
+        torch.save(self.optimizer.state_dict(), os.path.join(root, f'opt{epoch % n}.pth'))
 
     def train(self):
         """
